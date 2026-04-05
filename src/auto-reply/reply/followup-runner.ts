@@ -15,6 +15,7 @@ import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
+import { splitByReplyToTags } from "../../utils/directive-tags.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import type { OriginatingChannelType } from "../templating.js";
@@ -334,6 +335,28 @@ export function createFollowupRunner(params: {
       const nonReasoningPayloads = sanitizedPayloads.filter(
         (p) => !shouldSuppressReasoningPayload(p),
       );
+
+      // --- Multi-tag payload splitting ---
+      // When the LLM uses multiple [[reply_to:<id>]] tags in a single payload,
+      // split that payload into one segment per tag so each reply targets the
+      // correct message.
+      const multiTagPayloads = nonReasoningPayloads.flatMap((payload) => {
+        const text = payload.text;
+        if (!text || !text.includes("[[reply_to")) {
+          return [payload];
+        }
+        const segments = splitByReplyToTags(text);
+        if (segments.length <= 1) {
+          return [payload];
+        }
+        return segments.map((seg) => ({
+          ...payload,
+          text: seg.text,
+          replyToId: seg.replyToId,
+          replyToCurrent: seg.replyToCurrent,
+        }));
+      });
+
       const replyToChannel = resolveOriginMessageProvider({
         originatingChannel: queued.originatingChannel,
         provider: queued.run.messageProvider,
@@ -349,15 +372,20 @@ export function createFollowupRunner(params: {
 
       // When "auto" resolved to "first", inject replyToId + replyToCurrent
       // on every payload — same as if the model had used [[reply_to_current]].
-      // The "first" mode filter then naturally keeps it on the first payload only.
+      // Skip payloads that already have an explicit replyToId from tag splitting
+      // so the LLM's per-message targeting takes precedence over auto injection.
       const threadingPayloads =
         replyToMode === "first" && rawReplyToMode === "auto" && queued.messageId
-          ? nonReasoningPayloads.map((p) => ({
-              ...p,
-              replyToId: queued.messageId,
-              replyToCurrent: true,
-            }))
-          : nonReasoningPayloads;
+          ? multiTagPayloads.map((p) =>
+              p.replyToId
+                ? p
+                : {
+                    ...p,
+                    replyToId: queued.messageId,
+                    replyToCurrent: true,
+                  },
+            )
+          : multiTagPayloads;
       const replyTaggedPayloads: ReplyPayload[] = applyReplyThreading({
         payloads: threadingPayloads,
         replyToMode,
