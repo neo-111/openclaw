@@ -125,6 +125,7 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
       ? [externalPayload.mediaUrl]
       : [];
   const replyToId = externalPayload.replyToId;
+  console.log("[auto-trace] route-reply: replyToId:", replyToId);
   const hasChannelData = plugin?.messaging?.hasStructuredReplyPayload?.({
     payload: externalPayload,
   });

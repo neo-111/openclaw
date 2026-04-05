@@ -28,6 +28,7 @@ import {
   resolveOriginMessageTo,
 } from "./origin-routing.js";
 import { refreshQueuedFollowupSession, type FollowupRun } from "./queue.js";
+import { shouldSuppressReasoningPayload } from "./reply-payloads-base.js";
 import {
   applyReplyThreading,
   filterMessagingToolDuplicates,
@@ -144,6 +145,12 @@ export function createFollowupRunner(params: {
       upstreamAbortSignal: opts?.abortSignal,
     });
     try {
+      console.log(
+        "[auto-trace] followup-runner ENTERED: messageId:",
+        queued.messageId,
+        "prompt:",
+        queued.prompt?.substring(0, 60),
+      );
       const runId = crypto.randomUUID();
       const shouldSurfaceToControlUi = isInternalMessageChannel(
         resolveOriginMessageProvider({
@@ -330,23 +337,55 @@ export function createFollowupRunner(params: {
         }
         return [{ ...payload, text: stripped.text }];
       });
+      const nonReasoningPayloads = sanitizedPayloads.filter(
+        (p) => !shouldSuppressReasoningPayload(p),
+      );
       const replyToChannel = resolveOriginMessageProvider({
         originatingChannel: queued.originatingChannel,
         provider: queued.run.messageProvider,
       }) as OriginatingChannelType | undefined;
-      const replyToMode = resolveReplyToMode(
+      const rawReplyToMode = resolveReplyToMode(
         queued.run.config,
         replyToChannel,
         queued.originatingAccountId,
         queued.originatingChatType,
       );
+      // Followup runs are always queued work — "auto" resolves to "first" (quote the triggering message).
+      const replyToMode = rawReplyToMode === "auto" ? "first" : rawReplyToMode;
 
+      console.log(
+        "[auto-trace] followup-runner: rawMode:",
+        rawReplyToMode,
+        "resolved:",
+        replyToMode,
+        "messageId:",
+        queued.messageId,
+      );
+      // When "auto" resolved to "first", clear explicit replyToCurrent: false
+      // so the implicit messageId-based replyToId can be stamped by applyReplyThreading.
+      // The model sets replyToCurrent: false when it doesn't use [[reply_to_current]] tags,
+      // but for auto-quoting of queued messages we want implicit quoting regardless.
+      const threadingPayloads =
+        replyToMode === "first" && rawReplyToMode === "auto"
+          ? nonReasoningPayloads.map((p) =>
+              (p as { replyToCurrent?: boolean }).replyToCurrent === false
+                ? { ...p, replyToCurrent: undefined }
+                : p,
+            )
+          : nonReasoningPayloads;
       const replyTaggedPayloads: ReplyPayload[] = applyReplyThreading({
-        payloads: sanitizedPayloads,
+        payloads: threadingPayloads,
         replyToMode,
         replyToChannel,
+        currentMessageId: queued.messageId,
       });
-
+      console.log(
+        "[auto-trace] followup-runner payloads:",
+        replyTaggedPayloads.map((p) => ({
+          replyToId: p.replyToId,
+          text: p.text?.substring(0, 40),
+        })),
+      );
       const dedupedPayloads = filterMessagingToolDuplicates({
         payloads: replyTaggedPayloads,
         sentTexts: runResult.messagingToolSentTexts ?? [],

@@ -166,11 +166,21 @@ export async function runReplyAgent(params: {
     originatingChannel: sessionCtx.OriginatingChannel,
     provider: sessionCtx.Surface ?? sessionCtx.Provider,
   }) as OriginatingChannelType | undefined;
-  const replyToMode = resolveReplyToMode(
+  const rawReplyToMode = resolveReplyToMode(
     followupRun.run.config,
     replyToChannel,
     sessionCtx.AccountId,
     sessionCtx.ChatType,
+  );
+  const replyToMode =
+    rawReplyToMode === "auto" ? (sessionCtx.WasQueued ? "first" : "off") : rawReplyToMode;
+  console.log(
+    "[auto-trace] agent-runner: rawMode:",
+    rawReplyToMode,
+    "resolved:",
+    replyToMode,
+    "WasQueued:",
+    sessionCtx.WasQueued,
   );
   const applyReplyToMode = createReplyToModeFilterForChannel(replyToMode, replyToChannel);
   const cfg = followupRun.run.config;

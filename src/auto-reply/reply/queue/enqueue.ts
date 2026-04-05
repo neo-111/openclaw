@@ -91,6 +91,12 @@ export function enqueueFollowupRun(
   }
 
   queue.items.push(run);
+  console.log(
+    "[auto-trace] queue enqueue: messageId:",
+    run.messageId,
+    "prompt:",
+    run.prompt?.substring(0, 60),
+  );
   if (recentMessageIdKey) {
     RECENT_QUEUE_MESSAGE_IDS.check(recentMessageIdKey);
   }

@@ -129,10 +129,17 @@ export function scheduleFollowupDrain(
             summary,
             renderItem: (item, idx) => `---\nQueued #${idx + 1}\n${item.prompt}`.trim(),
           });
+          console.log(
+            "[auto-trace] drain collect: messageId:",
+            items.at(-1)?.messageId,
+            "itemCount:",
+            items.length,
+          );
           await effectiveRunFollowup({
             prompt,
             run,
             enqueuedAt: Date.now(),
+            messageId: items.at(-1)?.messageId,
             ...routing,
           });
           queue.items.splice(0, items.length);
@@ -154,6 +161,7 @@ export function scheduleFollowupDrain(
                 prompt: summaryPrompt,
                 run,
                 enqueuedAt: Date.now(),
+                messageId: item.messageId,
                 originatingChannel: item.originatingChannel,
                 originatingTo: item.originatingTo,
                 originatingAccountId: item.originatingAccountId,

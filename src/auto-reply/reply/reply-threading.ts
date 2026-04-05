@@ -107,6 +107,11 @@ export function createReplyToModeFilter(
 ) {
   let hasThreaded = false;
   return (payload: ReplyPayload): ReplyPayload => {
+    if (mode === "auto") {
+      // "auto" should be resolved to "first" or "off" before reaching the filter.
+      // If it leaks through unresolved, default to "off" (no quoting).
+      return { ...payload, replyToId: undefined };
+    }
     if (!payload.replyToId) {
       return payload;
     }
