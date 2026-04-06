@@ -374,19 +374,40 @@ export function createFollowupRunner(params: {
         queued.originatingAccountId,
         queued.originatingChatType,
       );
-      // Followup runs are always queued work — "auto" resolves to "first".
-      // When multi-tag splitting produced separate per-sender payloads,
-      // use "all" so each payload keeps its own replyToId.
-      const replyToMode =
-        rawReplyToMode === "auto" ? (didMultiTagSplit ? "all" : "first") : rawReplyToMode;
 
-      // When "auto" resolved to "first", inject replyToId + replyToCurrent
-      // on every payload — same as if the model had used [[reply_to_current]].
-      // Skip payloads that already have an explicit replyToId from tag splitting
-      // so the LLM's per-message targeting takes precedence over auto injection.
+      // --- Collected messageId enrichment ---
+      // When the drain collected N messages and the model produced N payloads,
+      // assign each payload its corresponding collected messageId.  This is
+      // more reliable than depending on the model to produce [[reply_to:...]]
+      // tags, because tags can be stripped during streaming or the model may
+      // omit them.  Model-produced replyToId takes precedence when present.
+      const collectedIds = queued.collectedMessageIds;
+      const hasCollectedMapping =
+        rawReplyToMode === "auto" &&
+        collectedIds &&
+        collectedIds.length > 1 &&
+        multiTagPayloads.length === collectedIds.length;
+      const collectedPayloads = hasCollectedMapping
+        ? multiTagPayloads.map((p, i) =>
+            p.replyToId ? p : { ...p, replyToId: collectedIds[i], replyToCurrent: true },
+          )
+        : multiTagPayloads;
+
+      // Followup runs are always queued work — "auto" resolves to "first".
+      // When collected mapping or multi-tag splitting produced per-message
+      // payloads, use "all" so each payload keeps its own replyToId.
+      const useAllMode = hasCollectedMapping || didMultiTagSplit;
+      const replyToMode =
+        rawReplyToMode === "auto" ? (useAllMode ? "all" : "first") : rawReplyToMode;
+
+      // When "auto" resolved to "first" (single queued message, no batch),
+      // inject replyToId + replyToCurrent on every payload — same as if
+      // the model had used [[reply_to_current]].
+      // Skip payloads that already have an explicit replyToId so the LLM's
+      // per-message targeting takes precedence over auto injection.
       const threadingPayloads =
         replyToMode === "first" && rawReplyToMode === "auto" && queued.messageId
-          ? multiTagPayloads.map((p) =>
+          ? collectedPayloads.map((p) =>
               p.replyToId
                 ? p
                 : {
@@ -395,7 +416,7 @@ export function createFollowupRunner(params: {
                     replyToCurrent: true,
                   },
             )
-          : multiTagPayloads;
+          : collectedPayloads;
       const replyTaggedPayloads: ReplyPayload[] = applyReplyThreading({
         payloads: threadingPayloads,
         replyToMode,

@@ -151,11 +151,15 @@ export function scheduleFollowupDrain(
             "itemCount:",
             items.length,
           );
+          const collectedMessageIds = items
+            .map((item) => item.messageId)
+            .filter((id): id is string => Boolean(id));
           await effectiveRunFollowup({
             prompt,
             run,
             enqueuedAt: Date.now(),
             messageId: items.at(-1)?.messageId,
+            collectedMessageIds: collectedMessageIds.length > 1 ? collectedMessageIds : undefined,
             ...routing,
           });
           queue.items.splice(0, items.length);
