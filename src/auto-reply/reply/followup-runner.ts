@@ -340,6 +340,7 @@ export function createFollowupRunner(params: {
       // When the LLM uses multiple [[reply_to:<id>]] tags in a single payload,
       // split that payload into one segment per tag so each reply targets the
       // correct message.
+      let didMultiTagSplit = false;
       const multiTagPayloads = nonReasoningPayloads.flatMap((payload) => {
         const text = payload.text;
         if (!text || !text.includes("[[reply_to")) {
@@ -349,6 +350,7 @@ export function createFollowupRunner(params: {
         if (segments.length <= 1) {
           return [payload];
         }
+        didMultiTagSplit = true;
         return segments.map((seg) => ({
           ...payload,
           text: seg.text,
@@ -367,8 +369,11 @@ export function createFollowupRunner(params: {
         queued.originatingAccountId,
         queued.originatingChatType,
       );
-      // Followup runs are always queued work — "auto" resolves to "first" (quote the triggering message).
-      const replyToMode = rawReplyToMode === "auto" ? "first" : rawReplyToMode;
+      // Followup runs are always queued work — "auto" resolves to "first".
+      // When multi-tag splitting produced separate per-sender payloads,
+      // use "all" so each payload keeps its own replyToId.
+      const replyToMode =
+        rawReplyToMode === "auto" ? (didMultiTagSplit ? "all" : "first") : rawReplyToMode;
 
       // When "auto" resolved to "first", inject replyToId + replyToCurrent
       // on every payload — same as if the model had used [[reply_to_current]].
