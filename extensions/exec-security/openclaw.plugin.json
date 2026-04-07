@@ -1,0 +1,23 @@
+{
+  "id": "exec-security",
+  "name": "Exec Security",
+  "description": "Protected file enforcement, write hardening, and exec command sanitization.",
+  "enabledByDefault": true,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "maxWriteLines": {
+        "type": "number",
+        "default": 200
+      },
+      "additionalProtectedPaths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  }
+}

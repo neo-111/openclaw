@@ -1,0 +1,13 @@
+{
+  "name": "@openclaw/exec-security",
+  "version": "2026.4.7",
+  "private": true,
+  "type": "module",
+  "description": "Protected file enforcement, write hardening, exec command sanitization",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.49"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}
