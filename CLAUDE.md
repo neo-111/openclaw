@@ -7,7 +7,8 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - **Docker Compose**: `docker-compose.yml` in project root
 - **Config**: `~/.openclaw/openclaw.json`
 - **Workspace**: `~/.openclaw/workspace/` (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, skills/)
-- **Skills**: `~/.openclaw/workspace/skills/` (11 active — 50+ archived in `skills-archive/`)
+- **Skills**: `~/.openclaw/workspace/skills/` (10 active — 50+ archived in `skills-archive/`)
+- **Dev-Tools Extension**: `extensions/dev-tools/` — glob, grep tools + read-before-edit hook (bundled, 8 plugins total)
 - **API Keys**: `.env.keys` (gitignored — NEVER commit)
 - **Gateway**: http://localhost:18789 (Control UI)
 - **Canvas**: http://localhost:18789/__openclaw__/canvas/ (agent-driven visual workspace)
@@ -57,6 +58,10 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - `OpenClaw num_ctx injection`: OpenClaw sends `contextWindow` as `num_ctx` to Ollama automatically (`extensions/ollama/src/stream.ts:610`). Models MUST have explicit entries in `models.providers.ollama.models[]` with correct `contextWindow`.
 - `Ollama context_length`: Check a model's actual trained context with `curl http://localhost:11434/api/show -d '{"name":"model"}'` and look at `*.context_length` in `model_info`.
 - `OLLAMA_FLASH_ATTENTION`: Set to `1` as user env var on Windows for ~50% KV cache VRAM reduction. Requires Ollama restart.
+- `openclaw.plugin.json configSchema`: MANDATORY for ALL plugins. Enforced at `src/plugins/manifest.ts:486`. Empty `{"type":"object","additionalProperties":false,"properties":{}}` is valid.
+- `channels.telegram.commands.ownerAllowFrom`: NOT a valid schema key (as of 2026.4.6). Removed.
+- Docker buildx output: Buffers all output until completion. Use `--progress=plain` and redirect stderr for visibility.
+- pnpm on Windows: Not installed. Use `docker run node:24-bookworm` with volume mount to run pnpm commands.
 
 ## Operations
 ```bash

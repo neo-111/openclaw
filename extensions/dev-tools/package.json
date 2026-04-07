@@ -1,0 +1,13 @@
+{
+  "name": "@openclaw/dev-tools",
+  "version": "2026.4.6",
+  "private": true,
+  "description": "OpenClaw dev-tools plugin — glob, grep, read-before-edit hook",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.49"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

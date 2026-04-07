@@ -1,0 +1,14 @@
+{
+  "id": "dev-tools",
+  "name": "Dev Tools",
+  "description": "File search (glob) and content search (grep) tools with read-before-edit enforcement.",
+  "enabledByDefault": true,
+  "contracts": {
+    "tools": ["glob", "grep"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

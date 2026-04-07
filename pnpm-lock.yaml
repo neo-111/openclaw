@@ -314,6 +314,12 @@ importers:
 
   extensions/deepseek: {}
 
+  extensions/dev-tools:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.49
+        version: 0.34.49
+
   extensions/diagnostics-otel:
     dependencies:
       '@opentelemetry/api':
