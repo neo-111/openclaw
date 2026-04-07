@@ -12,14 +12,15 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - **Gateway**: http://localhost:18789 (Control UI)
 - **Canvas**: http://localhost:18789/__openclaw__/canvas/ (agent-driven visual workspace)
 - **Host filesystem**: Mounted at `/home/node/host/` inside container
-- **Workspace git**: `~/.openclaw/workspace/.git` (local version control, nightly backup planned)
+- **Workspace git**: `~/.openclaw/workspace/.git` (local version control, nightly auto-commit at 23:00 BRT)
 
 ## Agent Identity
 - **Name**: Jaz
 - **Gender**: Female, Black
-- **Primary model**: `anthropic/claude-sonnet-4-6` (Sonnet is now the primary for agentic reliability; local models too weak for tool chains)
-- **Fallback chain**: ollama/qwen3:32b → ollama/qwen3.5:27b → ollama/gemma4:31b → ollama/devstral
-- **Aliases**: `/model coding` (qwen3.5:27b), `/model fast` (qwen3.5:35b MoE), `/model power` (llama3.3:70b), `/model sonnet`, `/model opus`
+- **Primary model**: `anthropic/claude-sonnet-4-6` (cloud primary for critical work; local Qwen3.5-27B confirmed best for sequential tool chains)
+- **Fallback chain**: ollama/qwen3.5:27b → ollama/glm-4.7-flash → ollama/qwen3.5:35b → ollama/devstral
+- **Best local model**: Qwen3.5-27B (dense, 262K context, 15/15 on sequential tool chaining benchmarks)
+- **Aliases**: `/model coding` (qwen3.5:27b), `/model fast` (qwen3.5:35b MoE), `/model fast-agent` (glm-4.7-flash), `/model power` (llama3.3:70b), `/model sonnet`, `/model opus`
 - **Image generation**: ComfyUI via `/wan` skill (WAN 2.2 T2I Advanced dual-pass workflow) — fallback: `google/gemini-3.1-flash-image-preview`
 - **ComfyUI**: `http://host.docker.internal:8000` — WAN 2.2 T2I Advanced dual-pass workflow (20 steps, dpmpp_2m, 1920x1280, FusionX + FaceNaturalizer LoRAs, film grain). Reference at `workspace/comfyui-workflows/wan22-t2i-reference.json`. Skill: `/wan`
 - **Audio transcription**: Gemini (built-in provider, uses existing Google API key)
@@ -31,6 +32,7 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 
 ## Cron Jobs
 - **morning-briefing**: Daily at 08:00 BRT. Weather, news, tasks. Delivered to Telegram. Isolated session, local model.
+- **workspace-backup**: Daily at 23:00 BRT. Auto-commits workspace changes to git. Isolated session, no delivery.
 
 ## Skills
 - `/wan`: ComfyUI image generation — WAN 2.2 T2I Advanced dual-pass workflow. Takes a prompt, generates 1920x1280 image, delivers to Telegram.
@@ -52,6 +54,9 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - `ModelProviderSchema`: Uses `.strict()` in `src/config/zod-schema.core.ts` — no custom provider keys allowed under `models.providers`
 - Ollama model swapping: Only one model loaded at a time. `/model` switch causes cascade timeouts. Preload with keep_alive after switching.
 - `comfy` extension: Bundled at `/app/dist/extensions/comfy/`, loads automatically (`enabledByDefault: true`). Do NOT add to `plugins.load.paths`.
+- `OpenClaw num_ctx injection`: OpenClaw sends `contextWindow` as `num_ctx` to Ollama automatically (`extensions/ollama/src/stream.ts:610`). Models MUST have explicit entries in `models.providers.ollama.models[]` with correct `contextWindow`.
+- `Ollama context_length`: Check a model's actual trained context with `curl http://localhost:11434/api/show -d '{"name":"model"}'` and look at `*.context_length` in `model_info`.
+- `OLLAMA_FLASH_ATTENTION`: Set to `1` as user env var on Windows for ~50% KV cache VRAM reduction. Requires Ollama restart.
 
 ## Operations
 ```bash
