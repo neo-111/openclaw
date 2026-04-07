@@ -9,6 +9,7 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - **Workspace**: `~/.openclaw/workspace/` (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, skills/)
 - **Skills**: `~/.openclaw/workspace/skills/` (10 active — 50+ archived in `skills-archive/`)
 - **Dev-Tools Extension**: `extensions/dev-tools/` — glob, grep tools + read-before-edit hook (bundled, 8 plugins total)
+- **Exec-Security Extension**: `extensions/exec-security/` — DESIGNED, not yet built. Design spec at `docs/superpowers/specs/2026-04-07-exec-security-design.md`
 - **API Keys**: `.env.keys` (gitignored — NEVER commit)
 - **Gateway**: http://localhost:18789 (Control UI)
 - **Canvas**: http://localhost:18789/__openclaw__/canvas/ (agent-driven visual workspace)
@@ -34,16 +35,21 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 ## Cron Jobs
 - **morning-briefing**: Daily at 08:00 BRT. Weather, news, tasks. Delivered to Telegram. Isolated session, local model.
 - **workspace-backup**: Daily at 23:00 BRT. Auto-commits workspace changes to git. Isolated session, no delivery.
+- **memory-dreaming**: Daily at 03:00 BRT. 3-phase memory consolidation (light, REM, deep). Isolated session, local model.
 
 ## Skills
 - `/wan`: ComfyUI image generation — WAN 2.2 T2I Advanced dual-pass workflow. Takes a prompt, generates 1920x1280 image, delivers to Telegram.
-- 11 active skills total (10 from session 2 + /wan)
+- `/git-workflow`: Disciplined branching, conventional commits, merge cleanup via exec
+- `/project-scaffold`: Bootstrap new projects from brief — plan tree, generate, verify build
+- `/dev-orchestrator`: Master-Clone delegation via sessions_spawn for parallel task execution
+- 13 active skills: brainstorm, plan, execute-plan, memory-mgmt, morning-briefing, research, schedule, skill-creator, tasks, wan, git-workflow, project-scaffold, dev-orchestrator
 
 ## Key Config Gotchas
 - `gateway.bind`: "auto"|"lan"|"loopback"|"custom"|"tailnet" — NOT raw IPs
 - `session.reset`: uses `mode` + `atHour` — NOT `daily` + `dailyTime`
 - `groupPolicy`: "open"|"disabled"|"allowlist" — NOT "denylist"
-- `memory-core` dreaming config: schema rejects frequency/timezone properties
+- `memory-core` dreaming config: works via `plugins.entries.memory-core.config.dreaming` with `enabled` + `frequency` (cron string). Enabled at "0 3 * * *" (3 AM daily).
+- `compaction.truncateAfterCompaction`: NOT a valid key in current schema (2026.4.6). Rejected at startup.
 - `imageGenerationModel` vs `imageModel`: different models, different purposes
 - DeepSeek R1: does NOT support tool calling — cannot be in fallback chain
 - Volume changes need `docker compose up -d --force-recreate`, not just restart
