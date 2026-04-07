@@ -8,8 +8,8 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - **Config**: `~/.openclaw/openclaw.json`
 - **Workspace**: `~/.openclaw/workspace/` (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, skills/)
 - **Skills**: `~/.openclaw/workspace/skills/` (10 active — 50+ archived in `skills-archive/`)
-- **Dev-Tools Extension**: `extensions/dev-tools/` — glob, grep tools + read-before-edit hook (bundled, 8 plugins total)
-- **Exec-Security Extension**: `extensions/exec-security/` — DESIGNED, not yet built. Design spec at `docs/superpowers/specs/2026-04-07-exec-security-design.md`
+- **Dev-Tools Extension**: `extensions/dev-tools/` — glob, grep tools + read-before-edit hook + side-effect prompt guidance (bundled, 8 plugins total → 9 after exec-security deploy)
+- **Exec-Security Extension**: `extensions/exec-security/` — BUILT (Session 8), deploy pending. Protected files, write hardening, exec command sanitization. 8 files, 426 lines, hooks-only, priority 10.
 - **API Keys**: `.env.keys` (gitignored — NEVER commit)
 - **Gateway**: http://localhost:18789 (Control UI)
 - **Canvas**: http://localhost:18789/__openclaw__/canvas/ (agent-driven visual workspace)
@@ -41,8 +41,8 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - `/wan`: ComfyUI image generation — WAN 2.2 T2I Advanced dual-pass workflow. Takes a prompt, generates 1920x1280 image, delivers to Telegram.
 - `/git-workflow`: Disciplined branching, conventional commits, merge cleanup via exec
 - `/project-scaffold`: Bootstrap new projects from brief — plan tree, generate, verify build
-- `/dev-orchestrator`: Master-Clone delegation via sessions_spawn for parallel task execution
-- 13 active skills: brainstorm, plan, execute-plan, memory-mgmt, morning-briefing, research, schedule, skill-creator, tasks, wan, git-workflow, project-scaffold, dev-orchestrator
+- `/dev-orchestrator`: Two patterns — Master-Clone (parallel tasks) + Generator-Evaluator (quality-gated generation with max 2 iterations)
+- 13 active skills: brainstorm, plan, execute-plan, memory-mgmt, morning-briefing, research, schedule, skill-creator, tasks, wan, git-workflow, project-scaffold, dev-orchestrator (updated with Generator-Evaluator pattern)
 
 ## Key Config Gotchas
 - `gateway.bind`: "auto"|"lan"|"loopback"|"custom"|"tailnet" — NOT raw IPs
