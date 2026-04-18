@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import chokidar, { FSWatcher } from "chokidar";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   buildCaseInsensitiveExtensionGlob,
   classifyMemoryMultimodalPath,
@@ -36,14 +37,19 @@ import {
   type MemorySource,
   type MemorySyncProgressUpdate,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import {
   createEmbeddingProvider,
   type EmbeddingProvider,
   type EmbeddingProviderId,
   type EmbeddingProviderRuntime,
-  resolveEmbeddingProviderFallbackModel,
 } from "./embeddings.js";
+import { runMemoryAtomicReindex } from "./manager-atomic-reindex.js";
 import { openMemoryDatabaseAtPath } from "./manager-db.js";
+import {
+  applyMemoryFallbackProviderState,
+  resolveMemoryFallbackProviderRequest,
+} from "./manager-provider-state.js";
 import {
   resolveConfiguredScopeHash,
   resolveConfiguredSourcesForMeta,
@@ -51,6 +57,7 @@ import {
   type MemoryIndexMeta,
 } from "./manager-reindex-state.js";
 import { shouldSyncSessionsForReindex } from "./manager-session-reindex.js";
+import { resolveMemorySessionSyncPlan } from "./manager-session-sync-state.js";
 import {
   loadMemorySourceFileState,
   resolveMemorySourceExistingHash,
@@ -83,10 +90,29 @@ const IGNORED_MEMORY_WATCH_DIR_NAMES = new Set([
 
 const log = createSubsystemLogger("memory");
 
-function shouldIgnoreMemoryWatchPath(watchPath: string): boolean {
+function shouldIgnoreMemoryWatchPath(
+  watchPath: string,
+  stats?: { isDirectory?: () => boolean },
+  multimodalSettings?: ResolvedMemorySearchConfig["multimodal"],
+): boolean {
   const normalized = path.normalize(watchPath);
-  const parts = normalized.split(path.sep).map((segment) => segment.trim().toLowerCase());
-  return parts.some((segment) => IGNORED_MEMORY_WATCH_DIR_NAMES.has(segment));
+  const parts = normalized
+    .split(path.sep)
+    .map((segment) => normalizeLowercaseStringOrEmpty(segment));
+  if (parts.some((segment) => IGNORED_MEMORY_WATCH_DIR_NAMES.has(segment))) {
+    return true;
+  }
+  if (stats?.isDirectory?.()) {
+    return false;
+  }
+  const extension = normalizeLowercaseStringOrEmpty(path.extname(normalized));
+  if (extension.length === 0 || extension === ".md") {
+    return false;
+  }
+  if (!multimodalSettings) {
+    return true;
+  }
+  return classifyMemoryMultimodalPath(normalized, multimodalSettings) === null;
 }
 
 export function runDetachedMemorySync(sync: () => Promise<void>, reason: "interval" | "watch") {
@@ -140,6 +166,7 @@ export abstract class MemoryManagerSyncOps {
     string,
     { lastSize: number; pendingBytes: number; pendingMessages: number }
   >();
+  protected vectorDegradedWriteWarningShown = false;
   private lastMetaSerialized: string | null = null;
 
   protected abstract readonly cache: { enabled: boolean; maxEntries?: number };
@@ -164,6 +191,14 @@ export abstract class MemoryManagerSyncOps {
     options: { source: MemorySource; content?: string },
   ): Promise<void>;
 
+  protected resetVectorState(): void {
+    this.vectorReady = null;
+    this.vector.available = null;
+    this.vector.loadError = undefined;
+    this.vector.dims = undefined;
+    this.vectorDegradedWriteWarningShown = false;
+  }
+
   protected async ensureVectorReady(dimensions?: number): Promise<boolean> {
     if (!this.vector.enabled) {
       return false;
@@ -179,7 +214,7 @@ export abstract class MemoryManagerSyncOps {
     try {
       ready = (await this.vectorReady) || false;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = formatErrorMessage(err);
       this.vector.available = false;
       this.vector.loadError = message;
       this.vectorReady = null;
@@ -212,7 +247,7 @@ export abstract class MemoryManagerSyncOps {
       this.vector.available = true;
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = formatErrorMessage(err);
       this.vector.available = false;
       this.vector.loadError = message;
       log.warn(`sqlite-vec unavailable: ${message}`);
@@ -240,7 +275,7 @@ export abstract class MemoryManagerSyncOps {
     try {
       this.db.exec(`DROP TABLE IF EXISTS ${VECTOR_TABLE}`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = formatErrorMessage(err);
       log.debug(`Failed to drop ${VECTOR_TABLE}: ${message}`);
     }
   }
@@ -310,38 +345,6 @@ export abstract class MemoryManagerSyncOps {
     }
   }
 
-  private async swapIndexFiles(targetPath: string, tempPath: string): Promise<void> {
-    const backupPath = `${targetPath}.backup-${randomUUID()}`;
-    await this.moveIndexFiles(targetPath, backupPath);
-    try {
-      await this.moveIndexFiles(tempPath, targetPath);
-    } catch (err) {
-      await this.moveIndexFiles(backupPath, targetPath);
-      throw err;
-    }
-    await this.removeIndexFiles(backupPath);
-  }
-
-  private async moveIndexFiles(sourceBase: string, targetBase: string): Promise<void> {
-    const suffixes = ["", "-wal", "-shm"];
-    for (const suffix of suffixes) {
-      const source = `${sourceBase}${suffix}`;
-      const target = `${targetBase}${suffix}`;
-      try {
-        await fs.rename(source, target);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-          throw err;
-        }
-      }
-    }
-  }
-
-  private async removeIndexFiles(basePath: string): Promise<void> {
-    const suffixes = ["", "-wal", "-shm"];
-    await Promise.all(suffixes.map((suffix) => fs.rm(`${basePath}${suffix}`, { force: true })));
-  }
-
   protected ensureSchema() {
     const result = ensureMemoryIndexSchema({
       db: this.db,
@@ -368,7 +371,7 @@ export abstract class MemoryManagerSyncOps {
     const watchPaths = new Set<string>([
       path.join(this.workspaceDir, "MEMORY.md"),
       path.join(this.workspaceDir, "memory.md"),
-      path.join(this.workspaceDir, "memory", "**", "*.md"),
+      path.join(this.workspaceDir, "memory"),
     ]);
     const additionalPaths = normalizeExtraMemoryPaths(this.workspaceDir, this.settings.extraPaths);
     for (const entry of additionalPaths) {
@@ -392,7 +395,7 @@ export abstract class MemoryManagerSyncOps {
         }
         if (
           stat.isFile() &&
-          (entry.toLowerCase().endsWith(".md") ||
+          (normalizeLowercaseStringOrEmpty(entry).endsWith(".md") ||
             classifyMemoryMultimodalPath(entry, this.settings.multimodal) !== null)
         ) {
           watchPaths.add(entry);
@@ -403,7 +406,8 @@ export abstract class MemoryManagerSyncOps {
     }
     this.watcher = chokidar.watch(Array.from(watchPaths), {
       ignoreInitial: true,
-      ignored: (watchPath) => shouldIgnoreMemoryWatchPath(String(watchPath)),
+      ignored: (watchPath, stats) =>
+        shouldIgnoreMemoryWatchPath(watchPath, stats, this.settings.multimodal),
       awaitWriteFinish: {
         stabilityThreshold: this.settings.sync.watchDebounceMs,
         pollInterval: 100,
@@ -781,20 +785,20 @@ export abstract class MemoryManagerSyncOps {
     const files = targetSessionFiles
       ? Array.from(targetSessionFiles)
       : await listSessionFilesForAgent(this.agentId);
-    const activePaths = targetSessionFiles
-      ? null
-      : new Set(files.map((file) => sessionPathForFile(file)));
-    const existingRows =
-      activePaths === null
+    const sessionPlan = resolveMemorySessionSyncPlan({
+      needsFullReindex: params.needsFullReindex,
+      files,
+      targetSessionFiles,
+      sessionsDirtyFiles: this.sessionsDirtyFiles,
+      existingRows: targetSessionFiles
         ? null
         : loadMemorySourceFileState({
             db: this.db,
             source: "sessions",
-          }).rows;
-    const existingHashes =
-      existingRows === null ? null : new Map(existingRows.map((row) => [row.path, row.hash]));
-    const indexAll =
-      params.needsFullReindex || Boolean(targetSessionFiles) || this.sessionsDirtyFiles.size === 0;
+          }).rows,
+      sessionPathForFile,
+    });
+    const { activePaths, existingRows, existingHashes, indexAll } = sessionPlan;
     log.debug("memory sync: indexing session files", {
       files: files.length,
       indexAll,
@@ -976,7 +980,7 @@ export abstract class MemoryManagerSyncOps {
         meta,
         // Also detects provider→FTS-only transitions so orphaned old-model FTS rows are cleaned up.
         provider: this.provider ? { id: this.provider.id, model: this.provider.model } : null,
-        providerKey: this.providerKey,
+        providerKey: this.providerKey ?? undefined,
         configuredSources,
         configuredScopeHash,
         chunkTokens: this.settings.chunking.tokens,
@@ -1029,7 +1033,7 @@ export abstract class MemoryManagerSyncOps {
         this.sessionsDirty = false;
       }
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = formatErrorMessage(err);
       const activated =
         this.shouldFallbackOnError(reason) && (await this.activateFallbackProvider(reason));
       if (activated) {
@@ -1067,8 +1071,12 @@ export abstract class MemoryManagerSyncOps {
   }
 
   private async activateFallbackProvider(reason: string): Promise<boolean> {
-    const fallback = this.settings.fallback;
-    if (!fallback || fallback === "none" || !this.provider || fallback === this.provider.id) {
+    const fallbackRequest = resolveMemoryFallbackProviderRequest({
+      cfg: this.cfg,
+      settings: this.settings,
+      currentProviderId: this.provider?.id ?? null,
+    });
+    if (!fallbackRequest || !this.provider) {
       return false;
     }
     if (this.fallbackFrom) {
@@ -1076,30 +1084,33 @@ export abstract class MemoryManagerSyncOps {
     }
     const fallbackFrom = this.provider.id;
 
-    const fallbackModel = resolveEmbeddingProviderFallbackModel(
-      fallback,
-      this.settings.model,
-      this.cfg,
-    );
-
     const fallbackResult = await createEmbeddingProvider({
       config: this.cfg,
       agentDir: resolveAgentDir(this.cfg, this.agentId),
-      provider: fallback,
-      remote: this.settings.remote,
-      model: fallbackModel,
-      outputDimensionality: this.settings.outputDimensionality,
-      fallback: "none",
-      local: this.settings.local,
+      ...fallbackRequest,
     });
 
-    this.fallbackFrom = fallbackFrom;
-    this.fallbackReason = reason;
-    this.provider = fallbackResult.provider;
-    this.providerRuntime = fallbackResult.runtime;
+    const fallbackState = applyMemoryFallbackProviderState({
+      current: {
+        provider: this.provider,
+        fallbackFrom: this.fallbackFrom,
+        fallbackReason: this.fallbackReason,
+        providerUnavailableReason: undefined,
+        providerRuntime: this.providerRuntime,
+      },
+      fallbackFrom,
+      reason,
+      result: fallbackResult,
+    });
+    this.fallbackFrom = fallbackState.fallbackFrom;
+    this.fallbackReason = fallbackState.fallbackReason;
+    this.provider = fallbackState.provider;
+    this.providerRuntime = fallbackState.providerRuntime;
     this.providerKey = this.computeProviderKey();
     this.batch = this.resolveBatchConfig();
-    log.warn(`memory embeddings: switched to fallback provider (${fallback})`, { reason });
+    log.warn(`memory embeddings: switched to fallback provider (${fallbackRequest.provider})`, {
+      reason,
+    });
     return true;
   }
 
@@ -1120,6 +1131,7 @@ export abstract class MemoryManagerSyncOps {
       vectorAvailable: this.vector.available,
       vectorLoadError: this.vector.loadError,
       vectorDims: this.vector.dims,
+      vectorDegradedWriteWarningShown: this.vectorDegradedWriteWarningShown,
       vectorReady: this.vectorReady,
     };
 
@@ -1134,14 +1146,12 @@ export abstract class MemoryManagerSyncOps {
       this.vector.available = originalDbClosed ? null : originalState.vectorAvailable;
       this.vector.loadError = originalState.vectorLoadError;
       this.vector.dims = originalState.vectorDims;
+      this.vectorDegradedWriteWarningShown = originalState.vectorDegradedWriteWarningShown;
       this.vectorReady = originalDbClosed ? null : originalState.vectorReady;
     };
 
     this.db = tempDb;
-    this.vectorReady = null;
-    this.vector.available = null;
-    this.vector.loadError = undefined;
-    this.vector.dims = undefined;
+    this.resetVectorState();
     this.fts.available = false;
     this.fts.loadError = undefined;
     this.ensureSchema();
@@ -1149,74 +1159,73 @@ export abstract class MemoryManagerSyncOps {
     let nextMeta: MemoryIndexMeta | null = null;
 
     try {
-      this.seedEmbeddingCache(originalDb);
-      const shouldSyncMemory = this.sources.has("memory");
-      const shouldSyncSessions = this.shouldSyncSessions(
-        { reason: params.reason, force: params.force },
-        true,
-      );
+      nextMeta = await runMemoryAtomicReindex({
+        targetPath: dbPath,
+        tempPath: tempDbPath,
+        build: async () => {
+          this.seedEmbeddingCache(originalDb);
+          const shouldSyncMemory = this.sources.has("memory");
+          const shouldSyncSessions = this.shouldSyncSessions(
+            { reason: params.reason, force: params.force },
+            true,
+          );
 
-      if (shouldSyncMemory) {
-        await this.syncMemoryFiles({ needsFullReindex: true, progress: params.progress });
-        this.dirty = false;
-      }
+          if (shouldSyncMemory) {
+            await this.syncMemoryFiles({ needsFullReindex: true, progress: params.progress });
+            this.dirty = false;
+          }
 
-      if (shouldSyncSessions) {
-        await this.syncSessionFiles({ needsFullReindex: true, progress: params.progress });
-        this.sessionsDirty = false;
-        this.sessionsDirtyFiles.clear();
-      } else if (this.sessionsDirtyFiles.size > 0) {
-        this.sessionsDirty = true;
-      } else {
-        this.sessionsDirty = false;
-      }
+          if (shouldSyncSessions) {
+            await this.syncSessionFiles({ needsFullReindex: true, progress: params.progress });
+            this.sessionsDirty = false;
+            this.sessionsDirtyFiles.clear();
+          } else if (this.sessionsDirtyFiles.size > 0) {
+            this.sessionsDirty = true;
+          } else {
+            this.sessionsDirty = false;
+          }
 
-      nextMeta = {
-        model: this.provider?.model ?? "fts-only",
-        provider: this.provider?.id ?? "none",
-        providerKey: this.providerKey!,
-        sources: resolveConfiguredSourcesForMeta(this.sources),
-        scopeHash: resolveConfiguredScopeHash({
-          workspaceDir: this.workspaceDir,
-          extraPaths: this.settings.extraPaths,
-          multimodal: {
-            enabled: this.settings.multimodal.enabled,
-            modalities: this.settings.multimodal.modalities,
-            maxFileBytes: this.settings.multimodal.maxFileBytes,
-          },
-        }),
-        chunkTokens: this.settings.chunking.tokens,
-        chunkOverlap: this.settings.chunking.overlap,
-        ftsTokenizer: this.settings.store.fts.tokenizer,
-      };
-      if (!nextMeta) {
-        throw new Error("Failed to compute memory index metadata for reindexing.");
-      }
+          const meta: MemoryIndexMeta = {
+            model: this.provider?.model ?? "fts-only",
+            provider: this.provider?.id ?? "none",
+            providerKey: this.providerKey!,
+            sources: resolveConfiguredSourcesForMeta(this.sources),
+            scopeHash: resolveConfiguredScopeHash({
+              workspaceDir: this.workspaceDir,
+              extraPaths: this.settings.extraPaths,
+              multimodal: {
+                enabled: this.settings.multimodal.enabled,
+                modalities: this.settings.multimodal.modalities,
+                maxFileBytes: this.settings.multimodal.maxFileBytes,
+              },
+            }),
+            chunkTokens: this.settings.chunking.tokens,
+            chunkOverlap: this.settings.chunking.overlap,
+            ftsTokenizer: this.settings.store.fts.tokenizer,
+          };
 
-      if (this.vector.available && this.vector.dims) {
-        nextMeta.vectorDims = this.vector.dims;
-      }
+          if (this.vector.available && this.vector.dims) {
+            meta.vectorDims = this.vector.dims;
+          }
 
-      this.writeMeta(nextMeta);
-      this.pruneEmbeddingCacheIfNeeded?.();
+          this.writeMeta(meta);
+          this.pruneEmbeddingCacheIfNeeded?.();
 
-      this.db.close();
-      originalDb.close();
-      originalDbClosed = true;
-
-      await this.swapIndexFiles(dbPath, tempDbPath);
+          this.db.close();
+          originalDb.close();
+          originalDbClosed = true;
+          return meta;
+        },
+      });
 
       this.db = openMemoryDatabaseAtPath(dbPath, this.settings.store.vector.enabled);
-      this.vectorReady = null;
-      this.vector.available = null;
-      this.vector.loadError = undefined;
+      this.resetVectorState();
       this.ensureSchema();
       this.vector.dims = nextMeta?.vectorDims;
     } catch (err) {
       try {
         this.db.close();
       } catch {}
-      await this.removeIndexFiles(tempDbPath);
       restoreOriginalState();
       throw err;
     }

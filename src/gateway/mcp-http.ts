@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { loadConfig } from "../config/config.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { logDebug, logWarn } from "../logger.js";
 import { handleMcpJsonRpc } from "./mcp-http.handlers.js";
 import {
@@ -21,6 +22,14 @@ export {
   createMcpLoopbackServerConfig,
   getActiveMcpLoopbackRuntime,
 } from "./mcp-http.loopback-runtime.js";
+
+type McpLoopbackServer = {
+  port: number;
+  close: () => Promise<void>;
+};
+
+let activeMcpLoopbackServer: McpLoopbackServer | undefined;
+let activeMcpLoopbackServerPromise: Promise<McpLoopbackServer> | null = null;
 
 export async function startMcpLoopbackServer(port = 0): Promise<{
   port: number;
@@ -45,6 +54,7 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
           sessionKey: requestContext.sessionKey,
           messageProvider: requestContext.messageProvider,
           accountId: requestContext.accountId,
+          senderIsOwner: requestContext.senderIsOwner,
         });
 
         const messages = Array.isArray(parsed) ? parsed : [parsed];
@@ -72,9 +82,7 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(payload);
       } catch (error) {
-        logWarn(
-          `mcp loopback: request handling failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        logWarn(`mcp loopback: request handling failed: ${formatErrorMessage(error)}`);
         if (!res.headersSent) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify(jsonRpcError(null, -32700, "Parse error")));
@@ -98,13 +106,16 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
   setActiveMcpLoopbackRuntime({ port: address.port, token });
   logDebug(`mcp loopback listening on 127.0.0.1:${address.port}`);
 
-  return {
+  const server: McpLoopbackServer = {
     port: address.port,
     close: () =>
       new Promise<void>((resolve, reject) => {
         httpServer.close((error) => {
           if (!error) {
             clearActiveMcpLoopbackRuntime(token);
+            if (activeMcpLoopbackServer === server) {
+              activeMcpLoopbackServer = undefined;
+            }
           }
           if (error) {
             reject(error);
@@ -114,4 +125,33 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
         });
       }),
   };
+  return server;
+}
+
+export async function ensureMcpLoopbackServer(port = 0): Promise<McpLoopbackServer> {
+  if (activeMcpLoopbackServer) {
+    return activeMcpLoopbackServer;
+  }
+  if (!activeMcpLoopbackServerPromise) {
+    activeMcpLoopbackServerPromise = startMcpLoopbackServer(port)
+      .then((server) => {
+        activeMcpLoopbackServer = server;
+        return server;
+      })
+      .finally(() => {
+        activeMcpLoopbackServerPromise = null;
+      });
+  }
+  return activeMcpLoopbackServerPromise;
+}
+
+export async function closeMcpLoopbackServer(): Promise<void> {
+  const server =
+    activeMcpLoopbackServer ??
+    (activeMcpLoopbackServerPromise ? await activeMcpLoopbackServerPromise : undefined);
+  if (!server) {
+    return;
+  }
+  activeMcpLoopbackServer = undefined;
+  await server.close();
 }

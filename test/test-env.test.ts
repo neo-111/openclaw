@@ -71,17 +71,27 @@ describe("installTestEnv", () => {
         },
         channels: {
           telegram: {
-            streamMode: "block",
-            chunkMode: "newline",
-            blockStreaming: true,
-            draftChunk: {
-              minChars: 120,
+            streaming: {
+              mode: "block",
+              chunkMode: "newline",
+              block: {
+                enabled: true,
+              },
+              preview: {
+                chunk: {
+                  minChars: 120,
+                },
+              },
             },
           },
         },
       }`,
     );
     writeFile(path.join(realHome, ".openclaw", "credentials", "token.txt"), "secret\n");
+    writeFile(
+      path.join(realHome, ".openclaw", "external-plugins", "glueclaw", "openclaw.plugin.json"),
+      '{"id":"glueclaw"}\n',
+    );
     writeFile(
       path.join(realHome, ".openclaw", "agents", "main", "agent", "auth-profiles.json"),
       JSON.stringify({ version: 1, profiles: { default: { provider: "openai" } } }, null, 2),
@@ -127,7 +137,7 @@ describe("installTestEnv", () => {
     expect(copiedConfig.agents?.defaults?.agentDir).toBeUndefined();
     expect(copiedConfig.agents?.list?.[0]?.workspace).toBeUndefined();
     expect(copiedConfig.agents?.list?.[0]?.agentDir).toBeUndefined();
-    expect(copiedConfig.channels?.telegram?.streaming).toMatchObject({
+    expect(copiedConfig.channels?.telegram?.streaming).toEqual({
       mode: "block",
       chunkMode: "newline",
       block: { enabled: true },
@@ -136,6 +146,17 @@ describe("installTestEnv", () => {
 
     expect(
       fs.existsSync(path.join(testEnv.tempHome, ".openclaw", "credentials", "token.txt")),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          testEnv.tempHome,
+          ".openclaw",
+          "external-plugins",
+          "glueclaw",
+          "openclaw.plugin.json",
+        ),
+      ),
     ).toBe(true);
     expect(
       fs.existsSync(

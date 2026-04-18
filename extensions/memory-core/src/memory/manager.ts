@@ -1,5 +1,8 @@
+import type { DatabaseSync } from "node:sqlite";
 import { type FSWatcher } from "chokidar";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
+  createSubsystemLogger,
   resolveAgentDir,
   resolveAgentWorkspaceDir,
   resolveMemorySearchConfig,
@@ -12,6 +15,7 @@ import {
   type MemoryEmbeddingProbeResult,
   type MemoryProviderStatus,
   type MemorySearchManager,
+  type MemorySearchRuntimeDebug,
   type MemorySearchResult,
   type MemorySource,
   type MemorySyncProgressUpdate,
@@ -26,12 +30,18 @@ import {
 } from "./embeddings.js";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
 import { awaitPendingManagerWork, startAsyncSearchSync } from "./manager-async-state.js";
+import { MEMORY_BATCH_FAILURE_LIMIT } from "./manager-batch-state.js";
 import {
   closeManagedCacheEntries,
   getOrCreateManagedCacheEntry,
   resolveSingletonManagedCache,
 } from "./manager-cache.js";
 import { MemoryManagerEmbeddingOps } from "./manager-embedding-ops.js";
+import {
+  resolveMemoryPrimaryProviderRequest,
+  resolveMemoryProviderState,
+} from "./manager-provider-state.js";
+import { resolveMemorySearchPreflight } from "./manager-search-preflight.js";
 import { searchKeyword, searchVector } from "./manager-search.js";
 import {
   collectMemoryStatusAggregate,
@@ -45,13 +55,13 @@ import {
   runMemorySyncWithReadonlyRecovery,
   type MemoryReadonlyRecoveryState,
 } from "./manager-sync-control.js";
+import { applyTemporalDecayToHybridResults } from "./temporal-decay.js";
 const SNIPPET_MAX_CHARS = 700;
 const VECTOR_TABLE = "chunks_vec";
 const FTS_TABLE = "chunks_fts";
 const EMBEDDING_CACHE_TABLE = "embedding_cache";
-const BATCH_FAILURE_LIMIT = 2;
-
 const MEMORY_INDEX_MANAGER_CACHE_KEY = Symbol.for("openclaw.memoryIndexManagerCache");
+const log = createSubsystemLogger("memory");
 
 const { cache: INDEX_CACHE, pending: INDEX_CACHE_PENDING } =
   resolveSingletonManagedCache<MemoryIndexManager>(MEMORY_INDEX_MANAGER_CACHE_KEY);
@@ -138,12 +148,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     return await createEmbeddingProvider({
       config: params.cfg,
       agentDir: resolveAgentDir(params.cfg, params.agentId),
-      provider: params.settings.provider,
-      remote: params.settings.remote,
-      model: params.settings.model,
-      outputDimensionality: params.settings.outputDimensionality,
-      fallback: params.settings.fallback,
-      local: params.settings.local,
+      ...resolveMemoryPrimaryProviderRequest({ settings: params.settings }),
     });
   }
 
@@ -231,11 +236,12 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   }
 
   private applyProviderResult(providerResult: EmbeddingProviderResult): void {
-    this.provider = providerResult.provider;
-    this.fallbackFrom = providerResult.fallbackFrom;
-    this.fallbackReason = providerResult.fallbackReason;
-    this.providerUnavailableReason = providerResult.providerUnavailableReason;
-    this.providerRuntime = providerResult.runtime;
+    const providerState = resolveMemoryProviderState(providerResult);
+    this.provider = providerState.provider;
+    this.fallbackFrom = providerState.fallbackFrom;
+    this.fallbackReason = providerState.fallbackReason;
+    this.providerUnavailableReason = providerState.providerUnavailableReason;
+    this.providerRuntime = providerState.providerRuntime;
     this.providerInitialized = true;
   }
 
@@ -286,12 +292,31 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       maxResults?: number;
       minScore?: number;
       sessionKey?: string;
+      qmdSearchModeOverride?: "query" | "search" | "vsearch";
+      onDebug?: (debug: MemorySearchRuntimeDebug) => void;
     },
   ): Promise<MemorySearchResult[]> {
-    const cleaned = query.trim();
-    if (!cleaned) {
+    opts?.onDebug?.({ backend: "builtin" });
+    let hasIndexedContent = this.hasIndexedContent();
+    if (!hasIndexedContent) {
+      try {
+        // A fresh process can receive its first search before background watch/session
+        // syncs have built the index. Force one synchronous bootstrap so the first
+        // lookup after restart does not fail closed with empty results.
+        await this.sync({ reason: "search", force: true });
+      } catch (err) {
+        log.warn(`memory sync failed (search-bootstrap): ${String(err)}`);
+      }
+      hasIndexedContent = this.hasIndexedContent();
+    }
+    const preflight = resolveMemorySearchPreflight({
+      query,
+      hasIndexedContent,
+    });
+    if (!preflight.shouldSearch) {
       return [];
     }
+    const cleaned = preflight.normalizedQuery;
     void this.warmSession(opts?.sessionKey);
     startAsyncSearchSync({
       enabled: this.settings.sync.onSearch,
@@ -302,11 +327,9 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         log.warn(`memory sync failed (search): ${String(err)}`);
       },
     });
-    const hasIndexedContent = this.hasIndexedContent();
-    if (!hasIndexedContent) {
-      return [];
+    if (preflight.shouldInitializeProvider) {
+      await this.ensureProviderInitialized();
     }
-    await this.ensureProviderInitialized();
     const minScore = opts?.minScore ?? this.settings.query.minScore;
     const maxResults = opts?.maxResults ?? this.settings.query.maxResults;
     const hybrid = this.settings.query.hybrid;
@@ -322,17 +345,27 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         return [];
       }
 
-      // Extract keywords for better FTS matching on conversational queries
-      // e.g., "that thing we discussed about the API" → ["discussed", "API"]
-      const keywords = extractKeywords(cleaned, {
-        ftsTokenizer: this.settings.store.fts.tokenizer,
-      });
-      const searchTerms = keywords.length > 0 ? keywords : [cleaned];
-
-      // Search with each keyword and merge results
-      const resultSets = await Promise.all(
-        searchTerms.map((term) => this.searchKeyword(term, candidates).catch(() => [])),
-      );
+      const fullQueryResults = await this.searchKeyword(cleaned, candidates, {
+        boostFallbackRanking: true,
+      }).catch(() => []);
+      const resultSets =
+        fullQueryResults.length > 0
+          ? [fullQueryResults]
+          : await Promise.all(
+              // Fallback: broaden recall for conversational queries when the
+              // exact AND query is too strict to return any results.
+              (() => {
+                const keywords = extractKeywords(cleaned, {
+                  ftsTokenizer: this.settings.store.fts.tokenizer,
+                });
+                const searchTerms = keywords.length > 0 ? keywords : [cleaned];
+                return searchTerms.map((term) =>
+                  this.searchKeyword(term, candidates, { boostFallbackRanking: true }).catch(
+                    () => [],
+                  ),
+                );
+              })(),
+            );
 
       // Merge and deduplicate results, keeping highest score for each chunk
       const seenIds = new Map<string, (typeof resultSets)[0][0]>();
@@ -345,8 +378,14 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         }
       }
 
-      const merged = [...seenIds.values()].toSorted((a, b) => b.score - a.score);
-      return this.selectScoredResults(merged, maxResults, minScore, 0);
+      const merged = [...seenIds.values()];
+      const decayed = await applyTemporalDecayToHybridResults({
+        results: merged,
+        temporalDecay: hybrid.temporalDecay,
+        workspaceDir: this.workspaceDir,
+      });
+      const sorted = decayed.toSorted((a, b) => b.score - a.score);
+      return this.selectScoredResults(sorted, maxResults, minScore, 0);
     }
 
     // If FTS isn't available, hybrid mode cannot use keyword search; degrade to vector-only.
@@ -460,6 +499,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   private async searchKeyword(
     query: string,
     limit: number,
+    options?: { boostFallbackRanking?: boolean },
   ): Promise<Array<MemorySearchResult & { id: string; textScore: number }>> {
     if (!this.fts.enabled || !this.fts.available) {
       return [];
@@ -478,6 +518,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       sourceFilter,
       buildFtsQuery: (raw) => this.buildFtsQuery(raw),
       bm25RankToScore,
+      boostFallbackRanking: options?.boostFallbackRanking,
     });
     return results.map((entry) => entry as MemorySearchResult & { id: string; textScore: number });
   }
@@ -540,7 +581,19 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   }
 
   private enqueueTargetedSessionSync(sessionFiles?: string[]): Promise<void> {
-    return enqueueMemoryTargetedSessionSync(this, sessionFiles);
+    return enqueueMemoryTargetedSessionSync(
+      {
+        isClosed: () => this.closed,
+        getSyncing: () => this.syncing,
+        getQueuedSessionFiles: () => this.queuedSessionFiles,
+        getQueuedSessionSync: () => this.queuedSessionSync,
+        setQueuedSessionSync: (value) => {
+          this.queuedSessionSync = value;
+        },
+        sync: async (params) => await this.sync(params),
+      },
+      sessionFiles,
+    );
   }
 
   private isReadonlyDbError(err: unknown): boolean {
@@ -561,10 +614,6 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     const getDb = () => this.db;
     const setDb = (value: DatabaseSync) => {
       this.db = value;
-    };
-    const getVectorReady = () => this.vectorReady;
-    const setVectorReady = (value: Promise<boolean> | null) => {
-      this.vectorReady = value;
     };
     const getReadonlyRecoveryAttempts = () => this.readonlyRecoveryAttempts;
     const setReadonlyRecoveryAttempts = (value: number) => {
@@ -591,12 +640,6 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       },
       set db(value) {
         setDb(value);
-      },
-      get vectorReady() {
-        return getVectorReady();
-      },
-      set vectorReady(value) {
-        setVectorReady(value);
       },
       vector: this.vector,
       get readonlyRecoveryAttempts() {
@@ -625,6 +668,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       },
       runSync: (nextParams) => this.runSync(nextParams),
       openDatabase: () => this.openDatabase(),
+      resetVectorState: () => this.resetVectorState(),
       ensureSchema: () => this.ensureSchema(),
       readMeta: () => this.readMeta() ?? undefined,
     };
@@ -648,7 +692,16 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   status(): MemoryProviderStatus {
     const sourceFilter = this.buildSourceFilter();
     const aggregateState = collectMemoryStatusAggregate({
-      db: this.db,
+      db: {
+        prepare: (sql) => ({
+          all: (...args) =>
+            this.db.prepare(sql).all(...args) as Array<{
+              kind: "files" | "chunks";
+              source: MemorySource;
+              c: number;
+            }>,
+        }),
+      },
       sources: this.sources,
       sourceFilterSql: sourceFilter.sql,
       sourceFilterParams: sourceFilter.params,
@@ -704,7 +757,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       batch: {
         enabled: this.batch.enabled,
         failures: this.batchFailureCount,
-        limit: BATCH_FAILURE_LIMIT,
+        limit: MEMORY_BATCH_FAILURE_LIMIT,
         wait: this.batch.wait,
         concurrency: this.batch.concurrency,
         pollIntervalMs: this.batch.pollIntervalMs,
@@ -750,7 +803,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       await this.embedBatchWithRetry(["ping"]);
       return { ok: true };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = formatErrorMessage(err);
       return { ok: false, error: message };
     }
   }
