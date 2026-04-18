@@ -8,8 +8,8 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 - **Config**: `~/.openclaw/openclaw.json`
 - **Workspace**: `~/.openclaw/workspace/` (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, skills/)
 - **Skills**: `~/.openclaw/workspace/skills/` (10 active — 50+ archived in `skills-archive/`)
-- **Dev-Tools Extension**: `extensions/dev-tools/` — glob, grep tools + read-before-edit hook + side-effect prompt guidance (bundled, 8 plugins total → 9 after exec-security deploy)
-- **Exec-Security Extension**: `extensions/exec-security/` — BUILT (Session 8), deploy pending. Protected files, write hardening, exec command sanitization. 8 files, 426 lines, hooks-only, priority 10.
+- **Dev-Tools Extension**: `extensions/dev-tools/` — glob, grep tools + read-before-edit hook + side-effect prompt guidance (bundled, 9 plugins total)
+- **Exec-Security Extension**: `extensions/exec-security/` — DEPLOYED (Session 9). Protected files (20 suffixes), write hardening (>200 lines → must use edit), exec sanitization (zero-width Unicode, ANSI-C quoting, protected file operands). 8 files, 426 lines, hooks-only, priority 10.
 - **API Keys**: `.env.keys` (gitignored — NEVER commit)
 - **Gateway**: http://localhost:18789 (Control UI)
 - **Canvas**: http://localhost:18789/__openclaw__/canvas/ (agent-driven visual workspace)
@@ -19,7 +19,7 @@ Fork of `openclaw/openclaw` at `neo-111/openclaw`. Upstream tracked via `upstrea
 ## Agent Identity
 - **Name**: Jaz
 - **Gender**: Female, Black
-- **Primary model**: `anthropic/claude-sonnet-4-6` (cloud primary for critical work; local Qwen3.5-27B confirmed best for sequential tool chains)
+- **Primary model**: `ollama/qwen3.6:35b-a3b` (local MoE, 3B active, 262K context). Cloud fallback: `anthropic/claude-sonnet-4-6`
 - **Fallback chain**: ollama/qwen3.5:27b → ollama/glm-4.7-flash → ollama/qwen3.5:35b → ollama/devstral
 - **Best local model**: Qwen3.5-27B (dense, 262K context, 15/15 on sequential tool chaining benchmarks)
 - **Aliases**: `/model coding` (qwen3.5:27b), `/model fast` (qwen3.5:35b MoE), `/model fast-agent` (glm-4.7-flash), `/model power` (llama3.3:70b), `/model sonnet`, `/model opus`
